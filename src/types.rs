@@ -15,11 +15,11 @@ impl Vec3 {
     }
     
     pub fn length(&self) -> f64 {
-        (self.x.powf(2.0) + self.y.powf(2.0) + self.z.powf(2.0)).sqrt()
+        (self.x.powi(2) + self.y.powi(2) + self.z.powi(2)).sqrt()
     }
 
     pub fn length_s(&self) -> f64 {
-        self.x.powf(2.0) + self.y.powf(2.0) + self.z.powf(2.0)
+        self.x.powi(2) + self.y.powi(2) + self.z.powi(2)
     }
 
     pub fn dot(&self, rhs: Vec3) -> f64 {
@@ -46,6 +46,15 @@ impl Vec3 {
     pub fn random_in_unit_sphere(rng: &mut ThreadRng) -> Self {
         loop {
             let p = Vec3::random(Some(-1.0),Some(1.0), rng);
+            if p.length_s() < 1.0 {
+                return p;
+            }
+        }
+    }
+
+    pub fn random_on_unit_disk(rng: &mut ThreadRng) -> Vec3 {
+        loop {
+            let p = Vec3::new(rng.gen_range(-1.0..1.0), rng.gen_range(-1.0..1.0), 0.0);
             if p.length_s() < 1.0 {
                 return p;
             }
@@ -268,10 +277,9 @@ impl Default for HitRecord {
 }
 
 impl HitRecord {
-    fn set_face_normal(&mut self, r: Ray, outward_normal: Vec3) {
-        
-        let front_face = r.dir.dot(outward_normal) < 0f64;
-        if front_face {
+    fn set_face_normal(&mut self, r: Ray, outward_normal: Vec3) {     
+        self.front_face = r.dir.dot(outward_normal) < 0.0;
+        if self.front_face {
             self.normal = outward_normal;
         } else {
             self.normal = -outward_normal;
@@ -304,9 +312,9 @@ impl Hittable for Sphere {
         let oc = self.center - r.orig;
         let a = r.dir.length_s();
         let h = r.dir.dot(oc);
-        let c = oc.length_s() - self.radius.powf(2.0);
+        let c = oc.length_s() - self.radius.powi(2);
         
-        let d = h.powf(2.0) - a*c;
+        let d = h.powi(2) - a*c;
         if d < 0.0 {
             return false;
         }
@@ -431,34 +439,54 @@ pub struct Camera {
     pub pixel_delta_v: Vec3,
     pub samples_per_pixel: i32,
     pub pixel_samples_scale: f64,
-    pub max_depth: i32
+    pub max_depth: i32,
+    pub v_fov: f64,
+    pub lookfrom: Vec3,
+    pub lookat: Vec3,
+    pub vup: Vec3,
+    pub u: Vec3,
+    pub v: Vec3,
+    pub w: Vec3,
+    pub defocus_angle: f64,
+    pub focus_dist: f64,
+    pub defocus_disk_u: Vec3,
+    pub defocus_disk_v: Vec3,
 }
 
 impl Camera {
-    pub fn new(image_w: i32, aspect_ratio: f64, samples_per_pixel: i32, max_depth: i32) -> Self {
+    pub fn new(image_w: i32, aspect_ratio: f64, samples_per_pixel: i32, max_depth: i32, v_fov: f64, lookfrom: Vec3, lookat: Vec3, vup: Vec3, defocus_angle: f64, focus_dist:f64) -> Self {
     let mut image_h = (image_w as f64 /aspect_ratio) as i32;
     if image_h < 1 {
         image_h = 1;
     }
 
-    let center = Vec3::new(0.0, 0.0, 0.0);
+    let center = lookfrom;
     let pixel_samples_scale = 1.0 / (samples_per_pixel as f64);
     
-    let focal_l = 1.0;
-    let viewport_h = 2.0;
+    let theta = v_fov.to_radians();
+    let h = (theta / 2.0).tan();
+    let viewport_h = 2.0 * h * focus_dist;
     let viewport_w = viewport_h * (image_w as f64/image_h as f64);
     let camera_c = Vec3::new(0f64, 0f64, 0f64);
 
-    let viewport_u = Vec3::new(viewport_w, 0f64, 0f64);
-    let viewport_v = Vec3::new(0f64, -viewport_h, 0f64);
+    let w = (lookfrom - lookat).normalize();
+    let u = vup.cross(w).normalize();
+    let v = w.cross(u);
+
+    let viewport_u = u * viewport_w;
+    let viewport_v = -v * viewport_h;
 
     let pixel_delta_u = viewport_u / image_w as f64;
     let pixel_delta_v = viewport_v / image_h as f64;
 
-    let viewport_upper_left = camera_c - Vec3::new(0f64, 0f64, focal_l) - viewport_u/2.0 - viewport_v/2.0;
+    let viewport_upper_left = center - (w * focus_dist) - viewport_u/2.0 - viewport_v/2.0;
     let pixel00_l = viewport_upper_left + (pixel_delta_u + pixel_delta_v) * 0.5;
 
-    Camera{aspect_ratio, image_w, image_h, center, pixel00_l, pixel_delta_u, pixel_delta_v, samples_per_pixel, pixel_samples_scale, max_depth}
+    let defocus_radius = focus_dist * (defocus_angle / 2.0).to_radians().tan();
+    let defocus_disk_u = u * defocus_radius;
+    let defocus_disk_v = v * defocus_radius;
+
+    Camera{aspect_ratio, image_w, image_h, center, pixel00_l, pixel_delta_u, pixel_delta_v, samples_per_pixel, pixel_samples_scale, max_depth, v_fov, lookfrom, lookat, vup, u, v, w, defocus_angle, focus_dist, defocus_disk_u, defocus_disk_v}
     }
 
     pub fn ray_color(&self, r: &Ray, world: &impl Hittable, depth: i32, rng: &mut ThreadRng) -> Color {
@@ -519,10 +547,19 @@ impl Camera {
     pub fn get_ray(&self, x: i32, y: i32, rng: &mut ThreadRng) -> Ray {
         let offset = Vec3::new(rng.gen::<f64>() - 0.5, rng.gen::<f64>() - 0.5, 0.0);
         let pixel_sample = self.pixel00_l + (self.pixel_delta_u * (offset.x + x as f64)) + (self.pixel_delta_v * (offset.y + y as f64));
-        let ray_orig = self.center;
+        let ray_orig = if self.defocus_angle <= 0.0 {
+            self.center
+        } else {
+            self.defocus_disk_sample(rng)
+        };
         let ray_dir = (pixel_sample - ray_orig).normalize();
 
         Ray::new(ray_orig, ray_dir)
+    }
+
+    pub fn defocus_disk_sample(&self, rng: &mut ThreadRng) -> Vec3 {
+        let p = Vec3::random_on_unit_disk(rng);
+        self.center + (self.defocus_disk_u * p.x) + (self.defocus_disk_v * p.y)
     }
 }
 
@@ -544,7 +581,7 @@ impl Lambertian {
 impl Material for Lambertian {
     fn scatter(&self, _r_in: &Ray, rec: &HitRecord, attenuation: &mut Color, scattered: &mut Ray, rng: &mut ThreadRng) -> bool {
         let mut scatter_direction = rec.normal + Vec3::random_unit_vector(rng);
-        if scatter_direction.x < 1e-8 && scatter_direction.y < 1e-8 && scatter_direction.z < 1e-8 {
+        if scatter_direction.x < 1e-10 && scatter_direction.y < 1e-10 && scatter_direction.z < 1e-10 {
             scatter_direction = rec.normal;
         }
         *scattered = Ray::new(rec.p, scatter_direction);
@@ -587,7 +624,7 @@ impl Dielectric {
 }
 
 impl Material for Dielectric {
-    fn scatter(&self, r_in: &Ray, rec: &HitRecord, attenuation: &mut Color, scattered: &mut Ray, _rng: &mut ThreadRng) -> bool {
+    fn scatter(&self, r_in: &Ray, rec: &HitRecord, attenuation: &mut Color, scattered: &mut Ray, rng: &mut ThreadRng) -> bool {
         *attenuation = Color::new(1.0, 1.0, 1.0);
         let ri = if rec.front_face {
             1.0 / self.ref_index
@@ -596,9 +633,28 @@ impl Material for Dielectric {
         };
 
         let unit_dir = r_in.dir.normalize();
-        let refracted = unit_dir.refract(rec.normal, ri);
+        let cos_theta = -unit_dir.dot(rec.normal).min(1.0);
+        let sin_theta = (1.0 - cos_theta.powi(2)).sqrt();
 
-        *scattered = Ray::new(rec.p, refracted);
+        let cannot_refract = ri * sin_theta > 1.0;
+        let direction: Vec3;
+        let rf = rng.gen_range(0.0..1.0);
+
+        if cannot_refract || self.reflactence(cos_theta, ri) > rf {
+            direction = unit_dir.reflect(rec.normal);
+        } else {
+            direction = unit_dir.refract(rec.normal, ri);
+        }
+
+        *scattered = Ray::new(rec.p, direction);
         true
+    }
+}
+
+impl Dielectric {
+    pub fn reflactence(&self, cosine: f64, ref_index: f64) -> f64 {
+        let mut r0 = (1.0 - ref_index) / (1.0 + ref_index);
+        r0 = r0.powi(2);
+        r0 + ((1.0 - r0) * ((1.0 - cosine).powi(5)))
     }
 }
